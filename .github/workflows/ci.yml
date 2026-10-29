@@ -126,7 +126,7 @@ jobs:
         run: cargo deny check --workspace
 
       - name: Generate SBOM (CycloneDX)
-        run: cargo cyclonedx --workspace --output target/sbom.json --format json
+        run: cargo cyclonedx --output target/sbom.json --format json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
@@ -148,12 +148,25 @@ jobs:
           fetch-depth: 0
 
       - name: Run TruffleHog
+        id: trufflehog
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
           base: main
           head: HEAD
           extra_args: --fail --no-verification --json
+        continue-on-error: true
+
+      - name: Check results
+        if: steps.trufflehog.outcome == 'failure'
+        run: |
+          # TruffleHog fails on initial commit (BASE and HEAD same) - this is expected
+          if grep -q "BASE and HEAD commits are the same" <<< "${{ steps.trufflehog.outputs.stdout }}"; then
+            echo "⚠️ Initial commit - TruffleHog skipped (no history to scan)"
+            exit 0
+          fi
+          echo "❌ Secrets detected in repository"
+          exit 1
 
   # ============================================================
   # Multi-Platform Build

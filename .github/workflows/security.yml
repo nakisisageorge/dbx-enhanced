@@ -155,6 +155,11 @@ jobs:
       - name: Check results
         if: steps.trufflehog.outcome == 'failure'
         run: |
+          # TruffleHog fails on initial commit (BASE and HEAD same) - this is expected
+          if grep -q "BASE and HEAD commits are the same" <<< "${{ steps.trufflehog.outputs.stdout }}"; then
+            echo "⚠️ Initial commit - TruffleHog skipped (no history to scan)"
+            exit 0
+          fi
           echo "❌ Secrets detected in repository"
           exit 1
 
@@ -197,10 +202,10 @@ jobs:
             ${{ runner.os }}-cargo-sbom-
 
       - name: Generate SBOM (CycloneDX JSON)
-        run: cargo cyclonedx --workspace --output target/sbom.json --format json
+        run: cargo cyclonedx --output target/sbom.json --format json
 
       - name: Generate SBOM (SPDX)
-        run: cargo cyclonedx --workspace --output target/sbom.spdx.json --format spdx
+        run: cargo cyclonedx --output target/sbom.spdx.json --format spdx
 
       - name: Validate SBOM
         run: |
