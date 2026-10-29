@@ -191,10 +191,13 @@ jobs:
             ${{ runner.os }}-cargo-sbom-
 
       - name: Generate SBOM (CycloneDX JSON)
-        run: cargo cyclonedx --format json > target/sbom.json
+        run: |
+          mkdir -p target
+          cargo cyclonedx --format json > target/sbom.json
 
       - name: Generate SBOM (SPDX)
-        run: cargo cyclonedx --format spdx > target/sbom.spdx.json
+        run: |
+          cargo cyclonedx --format spdx > target/sbom.spdx.json
 
       - name: Validate SBOM
         run: |

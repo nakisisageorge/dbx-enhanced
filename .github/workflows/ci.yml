@@ -126,7 +126,9 @@ jobs:
         run: cargo deny check --workspace
 
       - name: Generate SBOM (CycloneDX)
-        run: cargo cyclonedx --format json > target/sbom.json
+        run: |
+          mkdir -p target
+          cargo cyclonedx --format json > target/sbom.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
