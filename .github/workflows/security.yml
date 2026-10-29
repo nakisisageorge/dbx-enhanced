@@ -144,31 +144,20 @@ jobs:
 
       - name: Run TruffleHog
         id: trufflehog
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          base: main
-          head: HEAD
-          extra_args: --fail --no-verification --json
-        continue-on-error: true
-
-      - name: Check results
-        if: steps.trufflehog.outcome == 'failure'
         run: |
-          # TruffleHog fails on initial commit (BASE and HEAD same) - this is expected
-          if grep -q "BASE and HEAD commits are the same" <<< "${{ steps.trufflehog.outputs.stdout }}"; then
+          # Install TruffleHog
+          curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh -s -- -b /usr/local/bin
+          
+          # Check if this is the initial commit (only one commit in history)
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          if [ "$COMMIT_COUNT" -eq 1 ]; then
             echo "⚠️ Initial commit - TruffleHog skipped (no history to scan)"
             exit 0
           fi
-          echo "❌ Secrets detected in repository"
-          exit 1
-
-      - name: Upload scan results
-        uses: actions/upload-artifact@v4
-        with:
-          name: trufflehog-results
-          path: trufflehog-results.json
-          retention-days: 90
+          
+          # Run TruffleHog
+          trufflehog git file://. --since-commit HEAD~1 --branch HEAD --fail --no-verification --json
+        continue-on-error: false
 
   # ============================================================
   # SBOM Generation
