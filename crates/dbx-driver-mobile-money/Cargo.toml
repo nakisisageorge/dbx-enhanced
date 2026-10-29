@@ -1,0 +1,28 @@
+[package]
+name = "dbx-driver-mobile-money"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Native drivers for African mobile money platforms: M-Pesa (Daraja API), MoMo (MTN), Airtel Money, Tigo Pesa, Orange Money, Vodacom M-Pesa"
+
+[dependencies]
+dbx-african-domain = { path = "../dbx-african-domain" }
+dbx-drivers = { path = "../dbx-drivers", default-features = false }
+dbx-types = { path = "../dbx-types", default-features = false }
+dbx-sql = { path = "../dbx-sql", default-features = false }
+dbx-platform = { path = "../dbx-platform" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "socks"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+wiremock = "0.6"

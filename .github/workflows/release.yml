@@ -1,0 +1,374 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  RUST_VERSION: "1.80"
+  NODE_VERSION: "20"
+  PNPM_VERSION: "9"
+
+jobs:
+  # ============================================================
+  # Pre-release Validation
+  # ============================================================
+  validate:
+    name: Pre-release Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag format
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+            echo "❌ Invalid tag format: $TAG (expected vX.Y.Z or vX.Y.Z-suffix)"
+            exit 1
+          fi
+          echo "✅ Tag format valid: $TAG"
+
+      - name: Check Cargo.toml version matches tag
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          CARGO_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "❌ Version mismatch: tag=$VERSION, Cargo.toml=$CARGO_VERSION"
+            exit 1
+          fi
+          echo "✅ Version matches: $VERSION"
+
+  # ============================================================
+  # Multi-platform Release Build
+  # ============================================================
+  release-build:
+    name: Release Build (${{ matrix.os }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+            archive: zip
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libsqlite3-dev \
+            pkg-config \
+            build-essential
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config openssl sqlite3
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build Rust workspace (release)
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          BIN_DIR="target/${{ matrix.target }}/release"
+          OUT_DIR="release-${{ matrix.os }}-${VERSION}"
+          mkdir -p "$OUT_DIR"
+          
+          # Copy main binaries
+          cp "$BIN_DIR/dbx${{ matrix.ext }}" "$OUT_DIR/"
+          cp "$BIN_DIR/dbx-bench${{ matrix.ext }}" "$OUT_DIR/"
+          cp "$BIN_DIR/dbx-mcp${{ matrix.ext }}" "$OUT_DIR/"
+          
+          # Copy docs
+          cp README.md "$OUT_DIR/"
+          cp LICENSE "$OUT_DIR/"
+          cp NOTICE "$OUT_DIR/"
+          cp .env.example "$OUT_DIR/" 2>/dev/null || true
+          
+          # Create archive
+          if [ "${{ matrix.archive }}" = "tar.gz" ]; then
+            tar -czf "${OUT_DIR}.tar.gz" -C "$OUT_DIR" .
+            echo "ARCHIVE=${OUT_DIR}.tar.gz" >> $GITHUB_OUTPUT
+          else
+            cd "$OUT_DIR" && zip -r "../${OUT_DIR}.zip" . && cd ..
+            echo "ARCHIVE=${OUT_DIR}.zip" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: "*.tar.gz"
+          retention-days: 90
+
+  # ============================================================
+  # Architecture Visualization Release Build
+  # ============================================================
+  arch-viz-release:
+    name: Architecture Viz Release Build
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./architecture-viz
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: ./architecture-viz
+        run: pnpm build
+
+      - name: Package architecture viz
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          OUT_DIR="architecture-viz-${VERSION}"
+          mkdir -p "$OUT_DIR"
+          cp -r architecture-viz/dist/* "$OUT_DIR/"
+          tar -czf "${OUT_DIR}.tar.gz" -C "$OUT_DIR" .
+          echo "ARCHIVE=${OUT_DIR}.tar.gz" >> $GITHUB_OUTPUT
+
+      - name: Upload architecture viz artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-viz-release
+          path: "architecture-viz-*.tar.gz"
+          retention-days: 90
+
+  # ============================================================
+  # SBOM for Release
+  # ============================================================
+  release-sbom:
+    name: Release SBOM
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@cargo-cyclonedx
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-sbom-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-sbom-
+
+      - name: Generate SBOM
+        run: cargo cyclonedx --workspace --output target/sbom.json --format json
+
+      - name: Package SBOM
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          cp target/sbom.json "sbom-${VERSION}.json"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-sbom
+          path: "sbom-*.json"
+          retention-days: 365
+
+  # ============================================================
+  # Create GitHub Release
+  # ============================================================
+  create-release:
+    name: Create GitHub Release
+    needs: [validate, release-build, arch-viz-release, release-sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          mkdir -p release-assets
+          
+          # Move all archives to release-assets
+          find artifacts -name "*.tar.gz" -o -name "*.zip" | while read file; do
+            cp "$file" release-assets/
+          done
+          
+          # Copy SBOM
+          cp artifacts/sbom-*.json release-assets/ 2>/dev/null || true
+          
+          ls -la release-assets/
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          cat << 'EOF' > release-notes.md
+          ## DBX Enhanced ${{ github.ref_name }}
+          
+          Enhanced distribution of DBX with African domain extensions, benchmark suite, and interactive architecture visualization.
+          
+          ### 🎯 What's New
+          
+          #### African Domain Drivers
+          - **Mobile Money (11 providers)**: M-Pesa Daraja (full), MTN MoMo, Airtel Money, Tigo Pesa, Orange Money, Vodacom M-Pesa, Wave, Chipper Cash, Paga, Opay, PalmPay
+          - **Interbank Settlement (8 systems)**: NIBSS (Nigeria), Pesalink (Kenya), GHIPSS (Ghana), RTC (South Africa), Zimswitch (Zimbabwe), TISS (Tanzania), UIP (Uganda), IPPS (Rwanda)
+          - **Healthcare Systems**: DHIS2 analytics, OpenMRS medical records
+          
+          #### Benchmark Suite (`dbx-bench`)
+          - 7 benchmark suites, 65+ benchmarks
+          - Regression detection with configurable thresholds
+          - Criterion-based statistical rigor (mean, median, p50/p95/p99, std dev, throughput)
+          - JSON/HTML reports with git metadata
+          
+          #### Architecture Visualization
+          - Interactive React Flow explorer (42 nodes, 38 edges)
+          - 9 categories: Core, Drivers, Platform, AI, MCP, Plugin, Frontend, External, Benchmark
+          - Search, filter, minimap, detail panels
+          - Deployable as static site
+          
+          #### CI/CD & Security
+          - 11-job CI pipeline (check, test, audit, deny, TruffleHog, SBOM, bench, build, viz)
+          - Multi-platform releases (Linux, macOS, Windows)
+          - cargo-audit, cargo-deny, TruffleHog, CycloneDX SBOM
+          
+          ### 📦 Installation
+          
+          Download the appropriate archive for your platform:
+          - **Linux**: `dbx-enhanced-${VERSION}-linux.tar.gz`
+          - **macOS**: `dbx-enhanced-${VERSION}-macos.tar.gz`
+          - **Windows**: `dbx-enhanced-${VERSION}-windows.zip`
+          
+          Extract and run:
+          ```bash
+          tar -xzf dbx-enhanced-${VERSION}-linux.tar.gz
+          ./dbx
+          ```
+          
+          ### 🔗 Links
+          
+          - **Documentation**: https://github.com/nakisisageorge/dbx-enhanced
+          - **Architecture Visualization**: https://nakisisageorge.github.io/dbx-enhanced/
+          - **Original DBX**: https://github.com/t8y2/dbx
+          
+          ### 🙏 Attribution
+          
+          Based on [DBX](https://github.com/t8y2/dbx) by t8y2 (Apache-2.0).
+          Enhanced by George Nakisisa / GICT Africa Technologies.
+          
+          ---
+          
+          **Full Changelog**: https://github.com/nakisisageorge/dbx-enhanced/commits/${{ github.ref_name }}
+          EOF
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          cat release-notes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: DBX Enhanced ${{ github.ref_name }}
+          body_path: release-notes.md
+          files: release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: false

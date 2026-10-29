@@ -1,0 +1,28 @@
+[package]
+name = "dbx-bench"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Comprehensive benchmark suite with regression detection for dbx database drivers, MCP tools, and AI provider"
+
+[dependencies]
+dbx-core = { path = "../dbx-core", default-features = false }
+dbx-drivers = { path = "../dbx-drivers", default-features = false }
+dbx-mcp = { path = "../dbx-mcp", default-features = false }
+dbx-ai-provider = { path = "../dbx-ai-provider" }
+dbx-types = { path = "../dbx-types", default-features = false }
+dbx-platform = { path = "../dbx-platform" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full", "test-util"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+statrs = "0.16"
+csv = "1"
+anyhow = "1.0"
+clap = { version = "4", features = ["derive", "env"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+tempfile = "3"

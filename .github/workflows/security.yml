@@ -1,0 +1,283 @@
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly on Monday 2 AM UTC
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.80"
+
+jobs:
+  # ============================================================
+  # Vulnerability Scanning
+  # ============================================================
+  vulnerability-scan:
+    name: Vulnerability Scan (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-audit-
+
+      - name: Run cargo-audit
+        run: cargo audit --workspace --json > audit-results.json || true
+
+      - name: Check for critical/high vulnerabilities
+        run: |
+          if [ -f audit-results.json ]; then
+            CRITICAL=$(jq '[.vulnerabilities.list[] | select(.advisory.severity == "critical")] | length' audit-results.json)
+            HIGH=$(jq '[.vulnerabilities.list[] | select(.advisory.severity == "high")] | length' audit-results.json)
+            echo "Critical: $CRITICAL, High: $HIGH"
+            if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
+              echo "❌ Critical or high severity vulnerabilities found"
+              jq '.vulnerabilities.list[] | select(.advisory.severity == "critical" or .advisory.severity == "high") | {package: .package.name, version: .package.version, advisory: .advisory.title, severity: .advisory.severity, url: .advisory.url}' audit-results.json
+              exit 1
+            else
+              echo "✅ No critical/high vulnerabilities"
+            fi
+          fi
+
+      - name: Upload audit results
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-audit-results
+          path: audit-results.json
+          retention-days: 90
+
+  # ============================================================
+  # Dependency Policy Check
+  # ============================================================
+  dependency-policy:
+    name: Dependency Policy (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-deny-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-deny-
+
+      - name: Run cargo-deny
+        run: cargo deny check --workspace --json > deny-results.json || true
+
+      - name: Check for policy violations
+        run: |
+          if [ -f deny-results.json ]; then
+            # Check for license violations
+            LICENSE_VIOLATIONS=$(jq '.licenses.unlicensed | length' deny-results.json 2>/dev/null || echo 0)
+            BANNED_VIOLATIONS=$(jq '.bans.deny | length' deny-results.json 2>/dev/null || echo 0)
+            VERSION_VIOLATIONS=$(jq '.versions.deny | length' deny-results.json 2>/dev/null || echo 0)
+            
+            echo "License violations: $LICENSE_VIOLATIONS"
+            echo "Banned crate violations: $BANNED_VIOLATIONS"
+            echo "Version violations: $VERSION_VIOLATIONS"
+            
+            if [ "$LICENSE_VIOLATIONS" -gt 0 ] || [ "$BANNED_VIOLATIONS" -gt 0 ] || [ "$VERSION_VIOLATIONS" -gt 0 ]; then
+              echo "❌ Dependency policy violations found"
+              exit 1
+            else
+              echo "✅ All dependency policies pass"
+            fi
+          fi
+
+      - name: Upload deny results
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-deny-results
+          path: deny-results.json
+          retention-days: 90
+
+  # ============================================================
+  # Secret Scanning
+  # ============================================================
+  secret-scanning:
+    name: Secret Scanning (TruffleHog)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog
+        id: trufflehog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          extra_args: --fail --no-verification --json
+        continue-on-error: true
+
+      - name: Check results
+        if: steps.trufflehog.outcome == 'failure'
+        run: |
+          echo "❌ Secrets detected in repository"
+          exit 1
+
+      - name: Upload scan results
+        uses: actions/upload-artifact@v4
+        with:
+          name: trufflehog-results
+          path: trufflehog-results.json
+          retention-days: 90
+
+  # ============================================================
+  # SBOM Generation
+  # ============================================================
+  sbom-generation:
+    name: SBOM Generation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@cargo-cyclonedx
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-sbom-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sbom-
+
+      - name: Generate SBOM (CycloneDX JSON)
+        run: cargo cyclonedx --workspace --output target/sbom.json --format json
+
+      - name: Generate SBOM (SPDX)
+        run: cargo cyclonedx --workspace --output target/sbom.spdx.json --format spdx
+
+      - name: Validate SBOM
+        run: |
+          if [ -f target/sbom.json ]; then
+            COMPONENTS=$(jq '.components | length' target/sbom.json)
+            echo "SBOM contains $COMPONENTS components"
+            jq '.metadata.component.name' target/sbom.json
+          fi
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: |
+            target/sbom.json
+            target/sbom.spdx.json
+          retention-days: 90
+
+  # ============================================================
+  # Supply Chain Security
+  # ============================================================
+  supply-chain:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Cargo.lock integrity
+        run: |
+          cargo verify-project
+          echo "✅ Cargo.toml/Cargo.lock consistent"
+
+      - name: Check for git dependencies
+        run: |
+          GIT_DEPS=$(grep -r 'git =' Cargo.toml crates/*/Cargo.toml 2>/dev/null | wc -l)
+          if [ "$GIT_DEPS" -gt 0 ]; then
+            echo "⚠️ Found $GIT_DEPS git dependencies (review for supply chain risk)"
+            grep -r 'git =' Cargo.toml crates/*/Cargo.toml 2>/dev/null
+          else
+            echo "✅ No git dependencies in Cargo.toml files"
+          fi
+
+      - name: Check for path dependencies (local only)
+        run: |
+          PATH_DEPS=$(grep -r 'path =' Cargo.toml crates/*/Cargo.toml 2>/dev/null | grep -v 'path = "../' | wc -l)
+          if [ "$PATH_DEPS" -gt 0 ]; then
+            echo "⚠️ Found $PATH_DEPS non-workspace path dependencies"
+          else
+            echo "✅ All path dependencies are workspace-internal"
+          fi
+
+  # ============================================================
+  # Security Summary
+  # ============================================================
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [vulnerability-scan, dependency-policy, secret-scanning, sbom-generation, supply-chain]
+    if: always()
+    steps:
+      - name: Check all security jobs
+        run: |
+          echo "Security scan summary:"
+          echo "vulnerability-scan: ${{ needs.vulnerability-scan.result }}"
+          echo "dependency-policy: ${{ needs.dependency-policy.result }}"
+          echo "secret-scanning: ${{ needs.secret-scanning.result }}"
+          echo "sbom-generation: ${{ needs.sbom-generation.result }}"
+          echo "supply-chain: ${{ needs.supply-chain.result }}"
+          
+          if [[ "${{ needs.vulnerability-scan.result }}" != "success" ]] || \
+             [[ "${{ needs.dependency-policy.result }}" != "success" ]] || \
+             [[ "${{ needs.secret-scanning.result }}" != "success" ]] || \
+             [[ "${{ needs.sbom-generation.result }}" != "success" ]] || \
+             [[ "${{ needs.supply-chain.result }}" != "success" ]]; then
+            echo "❌ One or more security checks failed"
+            exit 1
+          else
+            echo "✅ All security checks passed"
+          fi

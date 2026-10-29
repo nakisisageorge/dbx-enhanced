@@ -1,0 +1,18 @@
+{
+  "ignorePatterns": [
+    "https://github.com/nakisisageorge/dbx-enhanced/*",
+    "https://nakisisageorge.github.io/dbx-enhanced/",
+    "https://gictafrica.com",
+    "mailto:nakisisageorge@gmail.com"
+  ],
+  "replacementPatterns": [
+    {
+      "pattern": "nakisisageorge/dbx-enhanced",
+      "replacement": "t8y2/dbx"
+    }
+  ],
+  "aliveStatusCodes": [200, 301, 302],
+  "retryCount": 3,
+  "retryDelay": 1000,
+  "timeout": 10000
+}

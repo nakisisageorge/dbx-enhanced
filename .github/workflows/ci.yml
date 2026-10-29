@@ -1,0 +1,462 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.80"
+  NODE_VERSION: "20"
+  PNPM_VERSION: "9"
+
+jobs:
+  # ============================================================
+  # Rust Workspace Checks
+  # ============================================================
+  cargo-check:
+    name: Cargo Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ============================================================
+  # Unit & Integration Tests
+  # ============================================================
+  cargo-test:
+    name: Cargo Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+
+  # ============================================================
+  # Security Audit
+  # ============================================================
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@cargo-deny
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@cargo-cyclonedx
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-security-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-security-
+
+      - name: Run cargo-audit
+        run: cargo audit --workspace
+
+      - name: Run cargo-deny
+        run: cargo deny check --workspace
+
+      - name: Generate SBOM (CycloneDX)
+        run: cargo cyclonedx --workspace --output target/sbom.json --format json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: target/sbom.json
+          retention-days: 30
+
+  # ============================================================
+  # Secret Scanning
+  # ============================================================
+  secret-scan:
+    name: Secret Scan (TruffleHog)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          extra_args: --fail --no-verification --json
+
+  # ============================================================
+  # Multi-Platform Build
+  # ============================================================
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: dbx-linux
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            artifact: dbx-macos
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            artifact: dbx-windows
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libsqlite3-dev \
+            pkg-config \
+            build-essential
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pkg-config openssl sqlite3
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build Rust workspace (release)
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            target/${{ matrix.target }}/release/dbx*
+            target/${{ matrix.target }}/release/dbx-bench*
+            target/${{ matrix.target }}/release/dbx-mcp*
+          retention-days: 7
+
+  # ============================================================
+  # Benchmark Suite
+  # ============================================================
+  benchmark:
+    name: Benchmark Suite
+    runs-on: ubuntu-latest
+    needs: [cargo-check, cargo-test]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          version: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Build benchmark binary
+        run: cargo build --release --bin dbx-bench
+
+      - name: Run benchmarks (quick mode for CI)
+        run: |
+          cargo run --release --bin dbx-bench -- \
+            --iterations 10 \
+            --warmup 2 \
+            --regression \
+            --threshold 15.0 \
+            --output bench-results \
+            --format json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: bench-results/
+          retention-days: 30
+
+      - name: Check for regressions
+        run: |
+          if [ -f bench-results/benchmark-results.json ]; then
+            REGRESSED=$(jq '.has_regressions' bench-results/benchmark-results.json)
+            if [ "$REGRESSED" = "true" ]; then
+              echo "⚠️ Performance regressions detected!"
+              jq '.suites[] | select(.regressed_count > 0) | {name: .name, regressed: .regressed_count, total: .total_benchmarks}' bench-results/benchmark-results.json
+              exit 1
+            else
+              echo "✅ No performance regressions detected"
+            fi
+          fi
+
+  # ============================================================
+  # Architecture Visualization Build
+  # ============================================================
+  arch-viz:
+    name: Architecture Visualization
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./architecture-viz
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: ./architecture-viz
+        run: pnpm build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-viz
+          path: architecture-viz/dist/
+          retention-days: 30
+
+  # ============================================================
+  # Frontend Tests
+  # ============================================================
+  frontend-test:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Install dependencies
+        working-directory: ./apps/desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Run type check
+        working-directory: ./apps/desktop
+        run: pnpm typecheck
+
+      - name: Run lint
+        working-directory: ./apps/desktop
+        run: pnpm lint
+
+      - name: Run tests
+        working-directory: ./apps/desktop
+        run: pnpm test -- --run
+
+  # ============================================================
+  # Documentation Validation
+  # ============================================================
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate markdown links
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          config-file: '.markdown-link-check.json'
+
+      - name: Check required docs exist
+        run: |
+          required_docs=(
+            "README.md"
+            "DESIGN_DOCUMENT.md"
+            "PORTFOLIO_CASE_STUDY.md"
+            "BEFORE_AFTER.md"
+            "SECURITY.md"
+            "LICENSE"
+            "NOTICE"
+            ".env.example"
+          )
+          for doc in "${required_docs[@]}"; do
+            if [ ! -f "$doc" ]; then
+              echo "❌ Missing required document: $doc"
+              exit 1
+            fi
+          done
+          echo "✅ All required documents present"
+
+  # ============================================================
+  # Release (tag-triggered)
+  # ============================================================
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [cargo-check, cargo-test, security-audit, secret-scan, build, benchmark, arch-viz, frontend-test, docs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Linux
+          mv artifacts/dbx-linux/* release-assets/ 2>/dev/null || true
+          # macOS
+          mv artifacts/dbx-macos/* release-assets/ 2>/dev/null || true
+          # Windows
+          mv artifacts/dbx-windows/* release-assets/ 2>/dev/null || true
+          # Architecture viz
+          cp -r artifacts/architecture-viz release-assets/architecture-viz 2>/dev/null || true
+          # SBOM
+          cp artifacts/sbom-cyclonedx/sbom.json release-assets/ 2>/dev/null || true
+          # Benchmark results
+          cp -r artifacts/benchmark-results release-assets/ 2>/dev/null || true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
